@@ -7,9 +7,15 @@ import mediapipe as mp
 import multiprocessing
 from multiprocessing import Pool
 import glob
+import fnmatch
+
 
 #Videos:
-path = '/Users/josegarcia/Documents/GitHub/Sign-Language-Capstone/Data'
+PATH = '/Users/josegarcia/Documents/GitHub/Sign-Language-Capstone/Data'
+list_of_videos = []
+for file in os.listdir(PATH):
+    if fnmatch.fnmatch(file, '*.mp4'):
+        list_of_videos.append(file)
 
 
 mp_holistic = mp.solutions.holistic # Holistic model
@@ -54,41 +60,8 @@ def draw_styled_landmarks(image, results):
 #cap = cv2.VideoCapture(0)
 #mp4 = '/Users/josegarcia/Documents/GitHub/Sign-Language-Capstone/Data/_-adcxjm1R4_0-8-rgb_front.mp4'
 #cap = cv2.VideoCapture(mp4)
-# Set mediapipe model 
-def process_video(video):
-    cap = cv2.VideoCapture(video)
-    with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
-        while cap.isOpened():
-            while True:
-
-
-                # Read feed
-                ret, frame = cap.read()
-                if ret == True:
-
-
-
-                    # Make detections
-                    global image, results
-                    image, results = mediapipe_detection(frame, holistic)
-                    print(results)
-                    
-                    # Draw landmarks
-                    draw_styled_landmarks(image, results)
-
-                    # Show to screen
-                    #cv2.imshow('OpenCV Feed', image)
-
-                    # Break gracefully
-                    if cv2.waitKey(10) & 0xFF == ord('q'):
-                        break
-                else:
-                    break
-            cap.release()
-            cv2.destroyAllWindows()
 
 def extract_keypoints(results):
-    global vectors
     pose = np.array([[res.x, res.y, res.z, res.visibility] for res in results.pose_landmarks.landmark]).flatten() if results.pose_landmarks else np.zeros(33*4)
     face = np.array([[res.x, res.y, res.z] for res in results.face_landmarks.landmark]).flatten() if results.face_landmarks else np.zeros(468*3)
     lh = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark]).flatten() if results.left_hand_landmarks else np.zeros(21*3)
@@ -96,17 +69,50 @@ def extract_keypoints(results):
     vectors = np.concatenate([pose, face, lh, rh]) 
     return vectors
 
-def save_vectors(directory):
-    np.save(directory, vectors)
+# Set mediapipe model 
+def process_video(video):
+    try: 
+        os.makedirs(os.path.join(PATH+'/vectors/', video))
+    except:
+        pass
+
+    cap = cv2.VideoCapture(PATH+'/{}'.format(video))
+    with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
+        for frame_num in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))):
+            print([frame_num])
+            # Read feed
+            ret, frame = cap.read()
+            if ret == True:
+
+                # Make detections
+                image, results = mediapipe_detection(frame, holistic)
+                print(results)
+                
+                # Draw landmarks
+                draw_styled_landmarks(image, results)
+
+                #Export Keypoints
+                keypoints = extract_keypoints(results)
+                desired_dir = PATH+'/vectors/{}'.format(video)
+                full_path = os.path.join(desired_dir,str(frame_num))
+                np.save(full_path, keypoints)
+
+                # Break gracefully
+                if cv2.waitKey(10) & 0xFF == ord('q'):
+                    break
+            else:
+                break
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 def wrapper(video):
     process_video(video)
-    extract_keypoints(results)
-    save_vectors(path+'/vectors')
+    
 
-list_of_videos = glob.glob(path+'/*.mp4')
+
 print('starting the script')
+
 print('Processing ', len(list_of_videos), 'number of videos')
 if __name__ == '__main__':
     with multiprocessing.get_context("spawn").Pool() as pool:
