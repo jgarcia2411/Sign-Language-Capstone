@@ -91,6 +91,9 @@ def process_video(video):
                 # Draw landmarks
                 draw_styled_landmarks(image, results)
 
+                # Show videos on screen:
+                cv2.imshow('OpenCV Feed', image)
+
                 #Export Keypoints
                 keypoints = extract_keypoints(results)
                 desired_dir = PATH+'/vectors/{}'.format(video)
