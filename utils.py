@@ -1,13 +1,15 @@
 import cv2
 import numpy as np
-import os
-from matplotlib import pyplot as plt
-import time
 import mediapipe as mp
 import multiprocessing
 from multiprocessing import Pool
-import fnmatch
-import tensorflow as tf
+
+import os
+from torch.utils.data import Dataset
+import pandas as pd
+import torch
+from torchtext.data.metrics import bleu_score
+
 
 mp_holistic = mp.solutions.holistic # Holistic model
 mp_drawing = mp.solutions.drawing_utils # Drawing utilities
@@ -59,7 +61,7 @@ def extract_keypoints(results):
 def process_video(video):
     cap = cv2.VideoCapture(video)
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
-        
+        sequence = []
         for frame_num in range(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))):
             # Read feed
             ret, frame = cap.read()
@@ -73,46 +75,99 @@ def process_video(video):
 
                 #Export Keypoints
                 vectors = extract_keypoints(results)
+                sequence.append(vectors)
     cap.release()
     cv2.destroyAllWindows()
-    return vectors
+    return sequence
 
-class ShapeChecker():
-  def __init__(self):
-    # Keep a cache of every axis-name seen
-    self.shapes = {}
+class signvideosDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        self.annotations = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
 
-  def __call__(self, tensor, names, broadcast=False):
-    if not tf.executing_eagerly():
-      return
+    def __len__(self):
+        return len(self.annotations)
 
-    if isinstance(names, str):
-      names = (names,)
+    def __getitem__(self, index):
+        vectors = []
+        video_path = os.path.join(self.root_dir, self.annotations.iloc[index, 3])
+        coordinates = process_video(video_path)
+        vectors.append(coordinates)
+        y_label = self.annotations.iloc[index, 6]
+        if self.transform:
+            coordinates = self.transform(coordinates)
+            vectors.append(coordinates)
 
-    shape = tf.shape(tensor)
-    rank = tf.rank(tensor)
+        return vectors, y_label
 
-    if rank != len(names):
-      raise ValueError(f'Rank mismatch:\n'
-                       f'    found {rank}: {shape.numpy()}\n'
-                       f'    expected {len(names)}: {names}\n')
+def translate_sentence(model, vectors, english, device, max_length=50):
+    # print(sentence)
 
-    for i, name in enumerate(names):
-      if isinstance(name, int):
-        old_dim = name
-      else:
-        old_dim = self.shapes.get(name, None)
-      new_dim = shape[i]
+    # sys.exit()
 
-      if (broadcast and new_dim == 1):
-        continue
+    # Create tokens using spacy and everything in lower case (which is what our vocab is)
+    sequence = [vector for vector in vectors]
 
-      if old_dim is None:
-        # If the axis name is new, add its length to the cache.
-        self.shapes[name] = new_dim
-        continue
+    # print(tokens)
 
-      if new_dim != old_dim:
-        raise ValueError(f"Shape mismatch for dimension: '{name}'\n"
-                         f"    found: {new_dim}\n"
-                         f"    expected: {old_dim}\n")
+    # sys.exit()
+    # Add <SOS> and <EOS> in beginning and end respectively
+    #sequence.insert(0, english.init_token)
+    #sequence.append(english.eos_token)
+
+    # Convert to Tensor
+
+    sentence_tensor = torch.LongTensor(np.array(sequence)).to(device) #.unsqueeze(1)
+
+    # Build encoder hidden, cell state
+    with torch.no_grad():
+        hidden, cell = model.encoder(sentence_tensor)
+
+    outputs = [english.vocab.stoi["<sos>"]]
+
+    for _ in range(max_length):
+        previous_word = torch.LongTensor([outputs[-1]]).to(device)
+
+        with torch.no_grad():
+            output, hidden, cell = model.decoder(previous_word, hidden, cell)
+            best_guess = output.argmax(1).item()
+
+        outputs.append(best_guess)
+
+        # Model predicts it's the end of the sentence
+        if output.argmax(1).item() == english.vocab.stoi["<eos>"]:
+            break
+
+    translated_sentence = [english.vocab.itos[idx] for idx in outputs]
+
+    # remove start token
+    return translated_sentence[1:]
+
+
+def bleu(data, model, vectors, english, device):
+    targets = []
+    outputs = []
+
+    for example in data:
+        src = vars(example)["src"]
+        trg = vars(example)["trg"]
+
+        prediction = translate_sentence(model, src, vectors, english, device)
+        prediction = prediction[:-1]  # remove <eos> token
+
+        targets.append([trg])
+        outputs.append(prediction)
+
+    return bleu_score(outputs, targets)
+
+
+def save_checkpoint(state, filename="my_checkpoint.pth.tar"):
+    print("=> Saving checkpoint")
+    torch.save(state, filename)
+
+
+def load_checkpoint(checkpoint, model, optimizer):
+    print("=> Loading checkpoint")
+    model.load_state_dict(checkpoint["state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer"])

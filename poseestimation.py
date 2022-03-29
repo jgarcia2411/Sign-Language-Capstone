@@ -11,7 +11,7 @@ import fnmatch
 
 
 #Videos:
-PATH = '/Users/josegarcia/Documents/GitHub/Sign-Language-Capstone/Data'
+PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage/Data'
 list_of_videos = []
 for file in os.listdir(PATH):
     if fnmatch.fnmatch(file, '*.mp4'):
@@ -92,7 +92,7 @@ def process_video(video):
                 draw_styled_landmarks(image, results)
 
                 # Show videos on screen:
-                #cv2.imshow('OpenCV Feed', image)
+                cv2.imshow('OpenCV Feed', image)
 
                 #Export Keypoints
                 keypoints = extract_keypoints(results)

@@ -151,6 +151,8 @@ def create_hard_coded_decoder_input_model(batch_size):
     decoder_outputs = Lambda(lambda x: K.concatenate(x, axis=1))(all_outputs)
 
 
+
+#__________________________________________________________________________________________
 xdf_data = pd.read_csv('how2sign_realigned_train.csv')
 videos = ['_-adcxjm1R4_0-8-rgb_front', '_-adcxjm1R4_1-8-rgb_front','_0-JkwZ9o4Q_5-5-rgb_front',
              '_0-JkwZ9o4Q_6-5-rgb_front', '_0-JkwZ9o4Q_7-5-rgb_front', '_0-JkwZ9o4Q_8-5-rgb_front',
