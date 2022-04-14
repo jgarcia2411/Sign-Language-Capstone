@@ -3,14 +3,23 @@ import numpy as np
 import mediapipe as mp
 import multiprocessing
 from multiprocessing import Pool
-
+from torchtext.legacy.data import Field
+import spacy
+from torchtext.vocab import Vectors
 import os
 from torch.utils.data import Dataset
 import pandas as pd
 import torch
 from torchtext.data.metrics import bleu_score
+from transformers import AutoTokenizer
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.system("export CUDA_VISIBLE_DEVICES=''")
 
+OR_PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage'
+
+# %%____________________________________________Video Processing_______________________________________________________
+# This function reads a video frame by frame and returns a sequence of (#frames, dime=1662) vectors
 mp_holistic = mp.solutions.holistic # Holistic model
 mp_drawing = mp.solutions.drawing_utils # Drawing utilities
 
@@ -58,7 +67,7 @@ def extract_keypoints(results):
     vectors = np.concatenate([pose, face, lh, rh]) 
     return vectors
 
-def process_video(video):
+def process_video(video): #we can try to implement tqdm process bar here
     cap = cv2.VideoCapture(video)
     with mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5) as holistic:
         sequence = []
@@ -68,18 +77,34 @@ def process_video(video):
             if ret == True:
                 # Make detections
                 image, results = mediapipe_detection(frame, holistic)
-                print(results)
+                #print(results)
                 
                 # Draw landmarks
-                draw_styled_landmarks(image, results)
+                #draw_styled_landmarks(image, results)
 
                 #Export Keypoints
                 vectors = extract_keypoints(results)
                 sequence.append(vectors)
+
     cap.release()
     cv2.destroyAllWindows()
-    return sequence
+    return np.vstack(sequence)
 
+
+# %%____________________________________________Input Target Processing_________________________________________________
+# Here we are using 'Bert' model to get tokens ids out of 'Bert' vocabulary size = >5000. Here is where we are having
+# idex missmatch error.
+
+# Transformers tokenizer
+tokenizer = AutoTokenizer.from_pretrained('bert-base-cased')
+
+def tokenize_text(text):
+    return tokenizer.tokenize(text, padding=True) #padding returns sequence of tokens id with similar length
+
+english = Field(
+    init_token='<sos>', tokenize=tokenize_text, lower=True) #eos_token='<eos>'
+
+#__________________________________________________Class to feed in Pytorch data loader_______________________________
 class signvideosDataset(Dataset):
     def __init__(self, csv_file, root_dir, transform=None):
         self.annotations = pd.read_csv(csv_file)
@@ -90,24 +115,34 @@ class signvideosDataset(Dataset):
         return len(self.annotations)
 
     def __getitem__(self, index):
-        vectors = []
+        #vectors = []
         video_path = os.path.join(self.root_dir, self.annotations.iloc[index, 3])
-        coordinates = process_video(video_path)
-        vectors.append(coordinates)
+        coordinates = torch.from_numpy(process_video(video_path+'.mp4')).float()
+        #vectors.append(coordinates)
         y_label = self.annotations.iloc[index, 6]
+        y_label = english.preprocess(y_label)  # gives tokens
+        y_label.insert(0, english.init_token)  # <sos>
+        #y_label.append(english.eos_token)  # <eos>
+        y_label = tokenizer.convert_tokens_to_ids(y_label) # inserted line-> get idx from vocabulary
+        #y_label = english.preprocess(y_label) # gives tokens
+        # <sos>
+        # <eos>
+        #y_label = [english.vocab.stoi[token] for token in y_label] # maps tokens to vocabulary indices
+        y_label = torch.tensor(y_label)
         if self.transform:
             coordinates = self.transform(coordinates)
-            vectors.append(coordinates)
+            #vectors.append(coordinates)
 
-        return vectors, y_label
+        return coordinates, y_label
 
+# Ignore this for now, we will use this to make predictions after training.
 def translate_sentence(model, vectors, english, device, max_length=50):
     # print(sentence)
 
     # sys.exit()
 
     # Create tokens using spacy and everything in lower case (which is what our vocab is)
-    sequence = [vector for vector in vectors]
+    # sequence = vectors #changed  [vector for vector in vectors]
 
     # print(tokens)
 
@@ -118,7 +153,11 @@ def translate_sentence(model, vectors, english, device, max_length=50):
 
     # Convert to Tensor
 
-    sentence_tensor = torch.LongTensor(np.array(sequence)).to(device) #.unsqueeze(1)
+    #sentence_tensor = torch.LongTensor(sequence)#.to(device)#.unsqueeze(1)
+    #sentence_tensor = torch.Tensor(vectors).float().to(device) # changed np.array(sequence) to only sequence
+    #sentence_tensor = torch.from_numpy(vectors).float().to(device)
+    #sentence_tensor = sentence_tensor.float()
+
 
     # Build encoder hidden, cell state
     with torch.no_grad():
@@ -127,7 +166,7 @@ def translate_sentence(model, vectors, english, device, max_length=50):
     outputs = [english.vocab.stoi["<sos>"]]
 
     for _ in range(max_length):
-        previous_word = torch.LongTensor([outputs[-1]]).to(device)
+        previous_word = torch.LongTensor(np.array([outputs[-1]]))#.to(device)
 
         with torch.no_grad():
             output, hidden, cell = model.decoder(previous_word, hidden, cell)
