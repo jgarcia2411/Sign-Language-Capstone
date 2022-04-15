@@ -17,41 +17,6 @@ os.system("export CUDA_VISIBLE_DEVICES=''")
 
 #_______________________________Helpers_______---_____________________________
 
-#_________________I used this section only to build a vocabulary the same way in the video__________________________
-spacy_en = spacy.load('en_core_web_sm')
-spacy_de = spacy.load('de_core_news_sm')
-
-
-def tokenize_de(text):
-    """
-    Tokenizes German text from a string into a list of strings (tokens) and reverses it
-    """
-    return [tok.text for tok in spacy_de.tokenizer(text)][::-1]
-
-# This is what we should use to tokenize sentence
-def tokenize_en(text):
-    return [tok.text for tok in spacy_en.tokenizer(text)]
-
-#
-SRC = Field(tokenize = tokenize_de,
-            init_token = '<sos>',
-            eos_token = '<eos>',
-            lower = True)
-
-TRG = Field( tokenize = tokenize_en,
-            init_token='<sos>',eos_token='<eos>',
-             lower=True)
-
-## ____________________________________temporal files to build vocab_______________\
-vocab_data, non_vocab, temporal = Multi30k.splits(exts =('.de', '.en'),
-                                                  fields = (SRC, TRG))
-TRG.build_vocab(vocab_data, min_freq = 2) ## HERE IS WHERE WE BUILD A VOCABULARY: SIZE ~5388 words. This missmatch
-# with tokens ids > 5388. Token ids are obtained in the utils.py script using "bert". We should fix that processing part
-# using spacy model.
-
-print(f"Unique tokens in target (en) vocabulary: {len(TRG.vocab)}")
-# ___________________________________________________________________________________
-
 # ______________________________________________Training configuration__________________________________________
 
 num_epochs = 4
@@ -67,21 +32,22 @@ OR_PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage'
 
 DATA_DIR = '/home/ubuntu/ASL'
 
-train_annotations = pd.read_csv(OR_PATH+'/how2sign_realigned_train 2.csv')
+loader, dataset = get_loader(OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/", batch_size=batch_size)
 
+#__________________________________________Past version to load images__________________________________________________
 # signvideosDataset is a class defined in utils script. This is how pytorch works to get and process data efficiently.
 # we can modify OR_PATH and DATA_DIR to work in local computer with a small sample of videos.
 
-train_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/",
-                            transform= None)
-test_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_test.csv', root_dir=DATA_DIR+'/test_videos/',
-                            transform= None)
-val_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_val.csv', root_dir=DATA_DIR+'/val_videos/',
-                            transform= None)
+#train_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/",
+#                            transform= None)
+#test_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_test.csv', root_dir=DATA_DIR+'/test_videos/',
+#                           transform= None)
+#val_dataset = signvideosDataset(csv_file=OR_PATH+'/how2sign_realigned_val.csv', root_dir=DATA_DIR+'/val_videos/',
+#                            transform= None)
 # Data Loader is a pytorch function that give us data distributed in batches-> this is useful to don't crash memory
-train_loader = DataLoader(dataset=train_dataset, batch_size= batch_size, shuffle=True)
-test_loader = DataLoader(dataset=test_dataset, batch_size= batch_size, shuffle=True)
-val_loader = DataLoader(dataset=val_dataset, batch_size= batch_size, shuffle=True)
+#train_loader = DataLoader(dataset=train_dataset, batch_size= batch_size, shuffle=True)
+#test_loader = DataLoader(dataset=test_dataset, batch_size= batch_size, shuffle=True)
+#val_loader = DataLoader(dataset=val_dataset, batch_size= batch_size, shuffle=True)
 
 #_______________________________Model Architecture ___________________________________________________________________
 class Encoder(nn.Module):
@@ -169,9 +135,9 @@ class Seq2Seq(nn.Module):
         # trg = [sen_len, bach_size]
         batch_size = source.shape[1]
         target_len = target.shape[0]
-        target_vocab_size = len(TRG.vocab) #len(english.vocab) -> to 5000 just to try
+        target_vocab_size = len(dataset.vocab) #len(english.vocab) -> to 5000 just to try
 
-        outputs = torch.zeros(target_len, batch_size, target_vocab_size)#.to(device)
+        outputs = torch.zeros(target_len, batch_size, target_vocab_size).to(device)
 
         hidden, cell = self.encoder(source) #vector context 1024 dimension.
 
@@ -193,8 +159,8 @@ class Seq2Seq(nn.Module):
 #_____________________________________________ Training hyper-parameters__________________________________________
 
 input_size_encoder = 1662
-input_size_decoder = len(TRG.vocab)
-output_size = len(TRG.vocab)
+input_size_decoder = len(dataset.vocab)
+output_size = len(dataset.vocab)
 encoder_embedding_size = 300 #(100-300) standard
 decoder_embedding_size = 300
 hidden_size = 1024 # Look for this value in papers
@@ -208,7 +174,7 @@ step = 0
 
 encoder_net = Encoder(
     input_size_encoder, encoder_embedding_size, hidden_size, num_layers, enc_dropout
-)##.to(device)
+).to(device)
 
 decoder_net = Decoder(
     input_size_decoder,
@@ -217,12 +183,12 @@ decoder_net = Decoder(
     output_size,
     num_layers,
     dec_dropout
-)#.to(device)
+).to(device)
 
-model = Seq2Seq(encoder_net, decoder_net)#.to(device)
+model = Seq2Seq(encoder_net, decoder_net).to(device)
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-pad_idx = TRG.vocab.stoi['<pad>']
+pad_idx = dataset.vocab.stoi['<PAD>']
 criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
 if load_model:
@@ -236,13 +202,14 @@ for epoch in range(num_epochs):
 
     model.train()
 
-    for batch_idx, (inputs, labels) in enumerate(train_loader): #train_iterator
+    for batch_idx, (inputs, labels) in enumerate(loader): #train_iterator
             # Quick reshape input_data to LSTM:
             inputs = torch.reshape(inputs, (inputs.shape[1], inputs.shape[0], inputs.shape[-1]))
-            labels = torch.reshape(labels, (labels.shape[-1], labels.shape[0]))
+            #inputs = torch.cat(inputs).view(len(inputs), -1, 1)
+            #labels = torch.reshape(labels, (labels.shape[-1], labels.shape[0]))
             # Get input and targets and get to cuda
-            inp_data = inputs#.to(device)
-            target = labels#.to(device)
+            inp_data = inputs.to(device)
+            target = labels.to(device)
 
             # Forward prop
 
@@ -265,6 +232,8 @@ for epoch in range(num_epochs):
 
 
             loss = criterion(output, target) ######last bug is here, shapes of target and output
+
+            print(f'Batch # {batch_idx}, Training Loss = {loss}')
 
             # Back prop
             loss.backward()
