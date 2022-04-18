@@ -23,7 +23,7 @@ os.system("export CUDA_VISIBLE_DEVICES=''")
 OR_PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage'
 DATA_DIR = '/home/ubuntu/ASL'
 spacy_en = spacy.load('en_core_web_sm')
-
+device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
 
 # %%____________________________________________Video Processing_______________________________________________________
 # This function reads a video frame by frame and returns a sequence of (#frames, dime=1662) vectors
@@ -97,6 +97,14 @@ def process_video(video): #we can try to implement tqdm process bar here
     cv2.destroyAllWindows()
     return np.vstack(sequence)
 
+punctuations = """!()-[]{};:'"\,<>./?@#$%^&*_~"""
+def cleaner(sentence, punctuations):
+    no_punc = ''
+    for char in sentence:
+        if char not in punctuations:
+            no_punc = no_punc + char
+
+    return no_punc
 
 # %%____________________________________________Input Target Processing_________________________________________________
 
@@ -140,17 +148,27 @@ class Vocabulary:
 
 #__________________________________________________Class to feed in Pytorch data loader_______________________________
 class signvideosDataset(Dataset):
-    def __init__(self, csv_file, root_dir, transform=None):
-        # Tet with 100 videos for training
-        self.annotations = pd.read_csv(csv_file).head(100)
+    def __init__(self, csv_file, root_dir, keyword, transform=None):
+        # read entire annotations files to build vocabulary:
+        self.annotations = pd.read_csv(csv_file)
+        self.annotations['no_punc'] = self.annotations['SENTENCE'].apply(lambda x: cleaner(x, punctuations))
+        self.vocab = Vocabulary(1)
+        self.vocab.build_vocabulary(self.annotations['no_punc'].tolist())
+
+        # Tet with 100 videos for training, validating and testing
+        if keyword == "train":
+            self.annotations = self.annotations.head(500)
+        elif keyword == "test":
+            self.annotations = self.annotations.sample(20)
+        elif keyword == 'val':
+            self.annotations = self.annotations.sample(20)
+        else:
+            print('PLEASE SPECIFY KEYWORD')
         self.root_dir = root_dir
         self.transform = transform
 
-        self.sentences = self.annotations['SENTENCE']
 
-        #Inizialize vocaublary and build vocab
-        self.vocab = Vocabulary(2)
-        self.vocab.build_vocabulary(self.sentences.tolist())
+
 
 
     def __len__(self):
@@ -184,18 +202,64 @@ class MyCollate:
         targets = [item[1] for item in batch]
         targets = pad_sequence(targets, batch_first=False, padding_value=self.pad_idx)
         return coordinates, targets
+
+class collate_batch:
+    def __init__(self, pad_idx, frames_idx, device):
+        self.pad_idx = pad_idx
+        self.frames_ids = frames_idx
+
+        self.device = device
+
+    def __call__(self, batch):
+        self.text_list = []
+        self.coordinates_list = []
+        for (_coordinates, _text) in batch:
+
+            self.text_list.append(_text)
+            self.coordinates_list.append(torch.tensor(_coordinates).float())
+
+
+        self.text_list = pad_sequence(self.text_list, batch_first=False, padding_value=self.pad_idx)
+        self.coordinates_list = pad_sequence(self.coordinates_list, batch_first=False, padding_value=self.frames_ids)
+        return self.coordinates_list, self.text_list
+
 def get_loader(
         csv_file,
         root_dir,
-        batch_size = 32,
+        keyword,
+        batch_size = 2,
         transform=None
 ):
-    dataset = signvideosDataset(csv_file, root_dir, transform=transform)
+    dataset = signvideosDataset(csv_file, root_dir, keyword, transform=transform)
     pad_idx = dataset.vocab.stoi['<PAD>']
+    frames_ids = 1.0
     loader = DataLoader(dataset=dataset,
         batch_size= batch_size,
-        collate_fn = MyCollate(pad_idx = pad_idx))
+        collate_fn = collate_batch(pad_idx = pad_idx, frames_idx=frames_ids, device=device))
     return loader, dataset
+
+#batch_size = 2
+#loader, dataset = get_loader(OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/", keyword='train', batch_size=batch_size)
+
+#for batch_idx, (inputs, labels) in enumerate(loader):
+#    print(f'Batch number {batch_idx} \n Inputs Shape {inputs.shape} \n Labels Shape {labels.shape}')
+
+
+
+
+#def get_loader(
+#        csv_file,
+#        root_dir,
+#        keyword,
+#        batch_size = 32,
+#        transform=None
+#):
+#    dataset = signvideosDataset(csv_file, root_dir, keyword, transform=transform)
+#    pad_idx = dataset.vocab.stoi['<PAD>']
+#    loader = DataLoader(dataset=dataset,
+#        batch_size= batch_size,
+#        collate_fn = MyCollate(pad_idx = pad_idx))
+#    return loader, dataset
 
 
 #___________Uncomment this to test data loader___________________________________
@@ -207,71 +271,53 @@ def get_loader(
 
 #_______________________________________________________________________________________________________________________
 
-
-# Ignore this for now, we will use this to make predictions after training.
-def translate_sentence(model, vectors, english, device, max_length=50):
-    # print(sentence)
-
-    # sys.exit()
-
-    # Create tokens using spacy and everything in lower case (which is what our vocab is)
-    # sequence = vectors #changed  [vector for vector in vectors]
-
-    # print(tokens)
-
-    # sys.exit()
-    # Add <SOS> and <EOS> in beginning and end respectively
-    #sequence.insert(0, english.init_token)
-    #sequence.append(english.eos_token)
-
-    # Convert to Tensor
-
-    #sentence_tensor = torch.LongTensor(sequence)#.to(device)#.unsqueeze(1)
-    #sentence_tensor = torch.Tensor(vectors).float().to(device) # changed np.array(sequence) to only sequence
-    #sentence_tensor = torch.from_numpy(vectors).float().to(device)
-    #sentence_tensor = sentence_tensor.float()
-
-
-    # Build encoder hidden, cell state
+def translate_video(model, iterator, device, dataset, max_length=50):
+    translations = []
+    sentences = []
+    model.load_state_dict(torch.load('model_{}.pt'.format('SIGN2TEXT'), map_location=device))
+    model.eval()
     with torch.no_grad():
-        hidden, cell = model.encoder(sentence_tensor)
+        for batch_idx, (inputs, labels) in enumerate(iterator):
+            idx = [i.item() for i in labels]
+            sentences.append([dataset.vocab.itos[i] for i in idx][1:])
+            inp_data = inputs.to(device)
+            target = labels.to(device)
+            output = model(inp_data, target, 0)
+            translated_sentence = [dataset.vocab.itos[idx.argmax().item()] for idx in output]
+            translations.append(translated_sentence[1:])
 
-    outputs = [english.vocab.stoi["<sos>"]]
+    return sentences, translations
+            #inputs = torch.reshape(inputs, (inputs.shape[1], inputs.shape[0], inputs.shape[-1]))
+            #for sentence in labels:
+            #        idx = [i.item() for i in sentence]
+            #sentences.append([dataset.vocab.itos[i] for i in idx][1:])
+            #inp_data = inputs.to(device)
+            #target = labels.to(device)
 
-    for _ in range(max_length):
-        previous_word = torch.LongTensor(np.array([outputs[-1]]))#.to(device)
+            # Pass video through encoder
+            #hidden, cell = model.encoder(inp_data)
+            # Pass video through decoder
+            #outputs = [dataset.vocab.stoi["<SOS>"]]
 
-        with torch.no_grad():
-            output, hidden, cell = model.decoder(previous_word, hidden, cell)
-            best_guess = output.argmax(1).item()
+            #for _ in range(max_length):
+            #    previous_word = torch.tensor([outputs[-1]]).to(device)
+            #    previous_word = torch.tensor(np.array([outputs[-1]])).to(device)
 
-        outputs.append(best_guess)
+            #    with torch.no_grad():
+            #        output, hidden, cell = model.decoder(previous_word, hidden, cell)
+            #        best_guess = output.argmax(1).item()
 
-        # Model predicts it's the end of the sentence
-        if output.argmax(1).item() == english.vocab.stoi["<eos>"]:
-            break
+            #    outputs.append(best_guess)
 
-    translated_sentence = [english.vocab.itos[idx] for idx in outputs]
+            # Model predicts it's the end of the sentence
+            #    if output.argmax(1).item() == dataset.vocab.stoi["<EOS>"]:
+            #        break
 
-    # remove start token
-    return translated_sentence[1:]
+            #translated_sentence = [dataset.vocab.itos[idx.argmax().item()] for idx in output]
+
+            #translations.append(translated_sentence[1:])
 
 
-def bleu(data, model, vectors, english, device):
-    targets = []
-    outputs = []
-
-    for example in data:
-        src = vars(example)["src"]
-        trg = vars(example)["trg"]
-
-        prediction = translate_sentence(model, src, vectors, english, device)
-        prediction = prediction[:-1]  # remove <eos> token
-
-        targets.append([trg])
-        outputs.append(prediction)
-
-    return bleu_score(outputs, targets)
 
 
 def save_checkpoint(state, filename="my_checkpoint.pth.tar"):
@@ -283,3 +329,4 @@ def load_checkpoint(checkpoint, model, optimizer):
     print("=> Loading checkpoint")
     model.load_state_dict(checkpoint["state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer"])
+
