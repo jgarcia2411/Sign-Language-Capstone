@@ -1,6 +1,6 @@
 import random
-
 import torch
+import torch.utils.data
 import torch.nn as nn
 import torch.optim as optim
 from torchtext.legacy.data import Field, BucketIterator
@@ -11,59 +11,72 @@ import os
 from torch.utils.tensorboard import SummaryWriter
 import pandas as pd
 from utils import *
+import tqdm
+
+
 import math
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torchtext.legacy.datasets import Multi30k
 os.system("export CUDA_VISIBLE_DEVICES=''")
 
-#_______________________________Helpers_______---_____________________________
+#_______________________________Word embeddings_______---_____________________________
 
 # ______________________________________________Training configuration__________________________________________
 
-num_epochs = 2
+num_epochs = 20
 learning_rate = 0.001
-batch_size = 20
+batch_size = 1
 
 # Model hyper-parameters
 load_model = False
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
-#_______________________________Data_______---_____________________________
-# get the data then split
+
+#_______________________________Paths__________________________________________
 OR_PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage'
 
 DATA_DIR = '/home/ubuntu/ASL'
 
 glove_path = '/home/ubuntu/ASSINGMENTS'
 
-loader, dataset = get_loader(OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/", keyword='train', batch_size=batch_size)
+#_____________________________________________________Word2Vec___________________________________________
+embeddings = {} #vocab store 400k words from glove and embeddings dim 50
+with open(glove_path+'/glove.6B.50d.txt', 'rt') as fi:
+  full_content = fi.read().strip().split('\n')
+for i in range (len(full_content)):
+  i_word = full_content[i].split(' ')[0]
+  i_embeddings = np.array([[float(val) for val in full_content[i].split(' ')[1:]]])
+  embeddings[i_word] = i_embeddings
 
-val_loader, val_dataset = get_loader(OR_PATH+'/how2sign_realigned_val.csv', root_dir=DATA_DIR+"/val_videos/", keyword='val', batch_size=batch_size)
+# Append <SOS>, <EOS>, <PAD>, and <UNK> tokens to embbeddings:
+#embedding_array = np.array(embeddings)
+pad_emb_np = np.ones((1, embeddings['the'].shape[1])) #<PAD>
+pad_sos = np.zeros((1, embeddings['the'].shape[1])) #<SOS>
+pad_eos = np.zeros((1, embeddings['the'].shape[1])) #<EOS>
+pad_unk = np.mean([j for i,j in enumerate(embeddings.values())], axis=0, keepdims=True) #<UNK> take average
+#embedding_array = np.vstack((pad_emb_np,pad_sos,pad_eos,pad_unk, embedding_array)) # embedding array will be sent in model
+embeddings['<PAD>'] = pad_emb_np
+embeddings['<SOS>'] = pad_sos
+embeddings['<EOS>'] = pad_eos
+embeddings['<UNK>'] = pad_unk
 
-test_loader, test_dataset = get_loader(OR_PATH+'/how2sign_realigned_test.csv', root_dir=DATA_DIR+"/test_videos/", keyword= 'test', batch_size=1)
 
-print(f'your vocabulary size is: {len(dataset.vocab)}')
-print(f'your vocabulary size is: {len(val_dataset.vocab)}')
-print(f'your vocabulary size is: {len(test_dataset.vocab)}')
+# __________________________________________________Data________________________________________________________________
+
+loader, dataset = get_loader(OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/",keyword='train', batch_size=batch_size)
+
+val_loader = get_loader(OR_PATH+'/how2sign_realigned_val.csv', root_dir=DATA_DIR+"/val_videos/", keyword='val', batch_size=batch_size)
+
+test_loader = get_loader(OR_PATH+'/how2sign_realigned_test.csv', root_dir=DATA_DIR+"/test_videos/", keyword= 'test', batch_size=1)
+
+#print(f'your vocabulary size is: {len(dataset.vocab)}')
+#print(f'your vocabulary size is: {len(val_dataset.vocab)}')
+#print(f'your vocabulary size is: {len(test_dataset.vocab)}')
 
 #__________________________________________Helper funcion to use Word2Vec_______________________________________________
 #idea taken from: https://medium.com/@martinpella/how-to-use-pre-trained-word-embeddings-in-pytorch-71ca59249f76
 # https://androidkt.com/pre-train-word-embedding-in-pytorch/
-
-
-words = []
-idx = 0
-word2idx = {}
-glove = pd.read_csv(f'{glove_path}/glove.6B.300d.txt', sep=" ", quoting=3, header=None, index_col=0)
-glove_embedding = {key: val.values for key, val in glove.T.items()}
-
-matrix_len = len(dataset.vocab)
-weights_matrix = np.zeros((matrix_len, 50))
-words_found = 0
-
-for i, word in enumerate(dataset.vocab):
-    try:
-        weights_matrix[i] =
+#https://www.analyticsvidhya.com/blog/2020/03/pretrained-word-embeddings-nlp/
 
 
 
@@ -79,7 +92,7 @@ class Encoder(nn.Module):
         #Input one vector of 1662 keypoints from a sequence of #frames
         self.input_size = input_size
 
-        #Output size of embedding
+        #Output size of embedding - clear this
         self.embedding_size = embedding_size
 
         # Dimension of the NNs inside the lstm cell/ (hs,cs)'s dimension
@@ -105,7 +118,7 @@ class Encoder(nn.Module):
         # hidden = [n_layers * n_direction, batch_size, hid_dim]
         return hidden, cell
 
-class Decoder(nn.Module):
+class Decoder(nn.Module): #transfer function? sigmoid is supossed to be good
     def __init__(self, input_size, embedding_size, hidden_size, output_size, num_layers, p):
         # input_size : size english vocabulary
         # output_size: same input_size
@@ -116,7 +129,7 @@ class Decoder(nn.Module):
         self.output_size = output_size
         self.embedding_size = embedding_size
 
-        self.embedding = nn.Embedding(input_size, embedding_size) # english word -> embedding
+        #self.embedding = nn.Embedding.from_pretrained(torch.from_numpy(embedding_array).float()) # english word -> embedding
         # embedding gives shape: (1,batch_Size,embedding_size)
         self.rnn = nn.LSTM(embedding_size, hidden_size, num_layers, dropout=p)
         self.fc = nn.Linear(self.hidden_size, self.output_size)
@@ -125,12 +138,18 @@ class Decoder(nn.Module):
         # x = [batch_size]
         # hidden = [n_layers*n_dir, batch_size, hid_dim]
         # cell = [n_layers*n_dir, batch_size, hid_dim]
+        try:
+            x = embeddings[dataset.vocab.itos[x.item()]]
+        except:
+            x = embeddings['<UNK>'].squeeze(0) #bug solved with squeezing 1 dimension that was added during embedding
 
-        x = x.unsqueeze(0) # x = [1, , batchsize]
+        x = torch.from_numpy(x).float()  # gives word embedding -> vector 50 dimension every word
+        x = x.to(device)
+        x= x.unsqueeze(0) # x = [1, 1, dim]
 
-        embedding = self.dropout(self.embedding(x)) # embedding = [1, batch_size, emb_dim]
+        #embedding = self.dropout(self.embedding(x)) # embedding = [1, batch_size, emb_dim]
 
-        outputs, (hidden, cell) = self.rnn(embedding, (hidden, cell))
+        outputs, (hidden, cell) = self.rnn(x, (hidden, cell))
         # outputs = [seq_len, batch_size, hid_dime * n_dir]
         # hidden = [n_layers*n_dir, batch_size, hid_dim]
         # cell = [n_layers * n_dir, batch_size, hid_dim]
@@ -162,6 +181,7 @@ class Seq2Seq(nn.Module):
         x = target[0, :]
 
         for t in range(1, target_len):
+
             output, hidden, cell = self.decoder(x, hidden, cell)
             outputs[t] = output
 
@@ -177,10 +197,10 @@ class Seq2Seq(nn.Module):
 #_____________________________________________ Training hyper-parameters__________________________________________
 
 input_size_encoder = 1662
-input_size_decoder = len(dataset.vocab)
-output_size = len(dataset.vocab)
-encoder_embedding_size = 300 #(100-300) standard
-decoder_embedding_size = 300
+input_size_decoder = len(dataset.vocab.itos)
+output_size = len(dataset.vocab.itos) #len(dataset.vocab.stoi)
+encoder_embedding_size = 50 #(100-300) standard
+decoder_embedding_size = 50
 hidden_size = 256 # Look for this value in papers
 num_layers =1
 enc_dropout = 0.5
@@ -206,18 +226,18 @@ optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 pad_idx = dataset.vocab.stoi['<PAD>']
 criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
 
-sentences, translations = translate_video(model, test_loader, device, dataset)
-for i in sentences:
-    for j in translations:
-        print(f'Real sentence: \n {i} \n Translated:sentence: \n {j}')
+#sentences, translations = translate_video(model, test_loader, device, dataset)
+#for i in sentences:
+#    for j in translations:
+#        print(f'Real sentence: \n {i} \n Translated:sentence: \n {j}')
 
 
 
 def train(model, iterator, optimizer, criterion, clip):
     model.train()
     epoch_loss = 0
-
-    for batch_idx, (inputs, labels) in enumerate(iterator):
+    for batch_idx, (inputs, labels) in enumerate(tqdm.tqdm(iterator)):
+        #with tqdm(total=len(iterator)) as pbar:
         #inputs = inputs.view(inputs.shape[1], inputs.shape[0], inputs.shape[-1])
         inp_data = inputs.to(device)
         target = labels.to(device)
@@ -232,13 +252,16 @@ def train(model, iterator, optimizer, criterion, clip):
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
         epoch_loss+= loss.item()
+            #pbar.update(1)
+
     return epoch_loss / len(iterator)
 
 def evaluate(model, iterator, criterion):
     model.eval()
     epoch_loss = 0
     with torch.no_grad():
-        for batch_idx, (inputs, labels) in enumerate(iterator):
+        for batch_idx, (inputs, labels) in enumerate(tqdm.tqdm(iterator)):
+            #with tqdm(total=len(iterator)) as pbar:
             #inputs = torch.reshape(inputs, (inputs.shape[1], inputs.shape[0], inputs.shape[-1]))
             inp_data = inputs.to(device)
             target = labels.to(device)
@@ -249,6 +272,7 @@ def evaluate(model, iterator, criterion):
             target = target[1:].view(-1)  # target[1:]
             loss = criterion(output, target)
             epoch_loss += loss.item()
+            #pbar.update(1)
     return epoch_loss / len(iterator)
 
 
@@ -258,23 +282,24 @@ best_valid_loss = float('inf')
 
 for epoch in range(num_epochs):
     print(f'Epoch {epoch}  training')
-
     train_loss = train(model, loader, optimizer, criterion, CLIP)
-    print(f'Epoch {epoch}  evaluating')
-    valid_loss = evaluate(model, val_loader, criterion)
+    print(f'Epoch {epoch}  training loss = {train_loss}')
 
+    print(f'Epoch {epoch}  evaluating')
+    valid_loss = evaluate(model, test_loader, criterion)
+    print(f'Epoch {epoch}  test loss = {valid_loss}')
     if valid_loss < best_valid_loss:
         best_valid_loss = valid_loss
-        torch.save(model.state_dict(), 'model_{}.pt'.format('SIGN2TEXT'))
+        torch.save(model.state_dict(), 'model_{}.pt'.format('SIGN2TEXT_500'))
         print("The model has been saved!")
-        print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
-        print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
-
-
-sentences, translations = translate_video(model, test_loader, device, dataset)
-for i in sentences:
-    for j in translations:
-        print(f'Real sentence: \n {i} \n Translated:sentence: \n {j}')
+        print(f'\tBest Train Loss: {train_loss:.3f}')
+        print(f'\tBest Test Loss: {valid_loss:.3f}')
+        try:
+            sentences, translations = translate_video(model, test_loader, device, dataset) #dataset used for getting vocabulary
+            print(f'Original sentences \n {sentences}')
+            print(f' Translated Sentence \n {translations}')
+        except:
+            pass
 
 
 

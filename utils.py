@@ -22,8 +22,12 @@ os.system("export CUDA_VISIBLE_DEVICES=''")
 #
 OR_PATH = '/home/ubuntu/ASSINGMENTS/SignLanguage'
 DATA_DIR = '/home/ubuntu/ASL'
+glove_path = '/home/ubuntu/ASSINGMENTS'
 spacy_en = spacy.load('en_core_web_sm')
 device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
+training_videos = [i[:-4] for i in os.listdir('/home/ubuntu/ASL/train_videos')]
+test_videos = [i[:-4] for i in os.listdir('/home/ubuntu/ASL/test_videos')]
+val_videos = [i[:-4] for i in os.listdir('/home/ubuntu/ASL/val_videos')]
 
 # %%____________________________________________Video Processing_______________________________________________________
 # This function reads a video frame by frame and returns a sequence of (#frames, dime=1662) vectors
@@ -97,7 +101,9 @@ def process_video(video): #we can try to implement tqdm process bar here
     cv2.destroyAllWindows()
     return np.vstack(sequence)
 
-punctuations = """!()-[]{};:'"\,<>./?@#$%^&*_~"""
+#vectors = process_video('/home/ubuntu/ASL/train_videos/03SgrpiJkSw_0-8-rgb_front.mp4')
+
+punctuations = """!()-[]{};:\,<>./@#$%^&*_~...0123456789âÂ+-¦Ã©´¾½\x80\x99\x9c\x9d"""
 def cleaner(sentence, punctuations):
     no_punc = ''
     for char in sentence:
@@ -106,18 +112,20 @@ def cleaner(sentence, punctuations):
 
     return no_punc
 
+
 # %%____________________________________________Input Target Processing_________________________________________________
 
+
+
+# Own vocabulary
 class Vocabulary:
-    def __init__(self, freq_threshold):
+    def __init__(self, annotations_path=OR_PATH+'/how2sign_realigned_train 2.csv'):
         """freq_threshold: frequency of words to build vocabulary
         itos: index to string
         stoi: string to index"""
-
         self.itos ={0:"<PAD>", 1:"<SOS>", 2:"<EOS>", 3:"<UNK>"}
         self.stoi = {"<PAD>":0, "<SOS>":1, "<EOS>":2, "<UNK>": 3}
-        self.freq_threshold = freq_threshold
-
+        self.dataframe = pd.read_csv(annotations_path)
     def __len__(self):
         return len(self.itos)
 
@@ -125,19 +133,19 @@ class Vocabulary:
     def tokenizer_eng(text):
         return [tok.text.lower() for tok in spacy_en.tokenizer(text)]
 
-    def build_vocabulary(self, sentence_list):
-        frequencies= {}
-        idx =4 #3:<unk>
-        for sentence in sentence_list:
-            for word in self.tokenizer_eng(sentence):
-                if word not in frequencies:
-                    frequencies[word] = 1
-                else:
-                    frequencies[word] += 1
-                if frequencies[word] == self.freq_threshold:
-                    self.stoi[word] = idx
-                    self.itos[idx] = word
+    def build_vocabulary(self):
+        self.dataframe['clean_text'] = self.dataframe['SENTENCE'].apply(lambda x: cleaner(x,punctuations))
+        sentences_list = self.dataframe['clean_text'].tolist()
+        tokens_list = [self.tokenizer_eng(i) for i in sentences_list]
+        idx = 4  # 3:<unk>
+        for sentence in tokens_list:
+            for token in sentence:
+                if token not in self.stoi:
+                    self.itos[idx] = token
+                    self.stoi[token] = idx
                     idx += 1
+                else:
+                    pass
     def numericalize(self, text):
         tokenized_text = self.tokenizer_eng(text)
         return [
@@ -145,31 +153,30 @@ class Vocabulary:
             for token in tokenized_text
         ]
 
-
 #__________________________________________________Class to feed in Pytorch data loader_______________________________
 class signvideosDataset(Dataset):
-    def __init__(self, csv_file, root_dir, keyword, transform=None):
+    def __init__(self, csv_file, root_dir, keyword, transform=None): #vocabulary_list
         # read entire annotations files to build vocabulary:
         self.annotations = pd.read_csv(csv_file)
-        self.annotations['no_punc'] = self.annotations['SENTENCE'].apply(lambda x: cleaner(x, punctuations))
-        self.vocab = Vocabulary(1)
-        self.vocab.build_vocabulary(self.annotations['no_punc'].tolist())
+        self.annotations['clean text'] = self.annotations['SENTENCE'].apply(lambda x: cleaner(x, punctuations))
+        self.vocab = Vocabulary()
+        self.vocab.build_vocabulary()
+        self.keyword = keyword
 
         # Tet with 100 videos for training, validating and testing
-        if keyword == "train":
-            self.annotations = self.annotations.head(500)
-        elif keyword == "test":
-            self.annotations = self.annotations.sample(20)
-        elif keyword == 'val':
-            self.annotations = self.annotations.sample(20)
+        if self.keyword == "train":
+            self.annotations = self.annotations[self.annotations['SENTENCE_NAME'].isin(training_videos)]
+            self.annotations = self.annotations.sample(15000)
+        elif self.keyword == "test":
+            self.annotations = self.annotations[self.annotations['SENTENCE_NAME'].isin(test_videos)]
+            self.annotations = self.annotations.sample(10)
+        elif self.keyword == 'val':
+            self.annotations = self.annotations[self.annotations['SENTENCE_NAME'].isin(val_videos)]
+            self.annotations = self.annotations.sample(10)
         else:
             print('PLEASE SPECIFY KEYWORD')
         self.root_dir = root_dir
         self.transform = transform
-
-
-
-
 
     def __len__(self):
         return len(self.annotations)
@@ -184,11 +191,10 @@ class signvideosDataset(Dataset):
             coordinates = self.transform(coordinates)
 
         # Reads sentence to process with tokenizer
-        y_label = self.annotations.iloc[index, 6]
+        y_label = self.annotations.iloc[index, 7]
         numericalized_caption = [self.vocab.stoi["<SOS>"]]
         numericalized_caption += self.vocab.numericalize(y_label) #word->index
         numericalized_caption.append(self.vocab.stoi["<EOS>"])
-
         return coordinates , torch.tensor(numericalized_caption)
 
 class MyCollate:
@@ -227,16 +233,20 @@ def get_loader(
         csv_file,
         root_dir,
         keyword,
-        batch_size = 2,
+        batch_size = 1,
         transform=None
 ):
-    dataset = signvideosDataset(csv_file, root_dir, keyword, transform=transform)
+    dataset = signvideosDataset(csv_file, root_dir, keyword,transform=transform)
     pad_idx = dataset.vocab.stoi['<PAD>']
     frames_ids = 1.0
     loader = DataLoader(dataset=dataset,
         batch_size= batch_size,
-        collate_fn = collate_batch(pad_idx = pad_idx, frames_idx=frames_ids, device=device))
-    return loader, dataset
+        collate_fn = collate_batch(pad_idx = pad_idx, frames_idx=frames_ids, device=device), num_workers=8)
+    if keyword == 'train':
+        return loader, dataset
+    else:
+        return loader
+
 
 #batch_size = 2
 #loader, dataset = get_loader(OR_PATH+'/how2sign_realigned_train 2.csv', root_dir=DATA_DIR+"/train_videos/", keyword='train', batch_size=batch_size)
@@ -274,7 +284,7 @@ def get_loader(
 def translate_video(model, iterator, device, dataset, max_length=50):
     translations = []
     sentences = []
-    model.load_state_dict(torch.load('model_{}.pt'.format('SIGN2TEXT'), map_location=device))
+    model.load_state_dict(torch.load('model_{}.pt'.format('SIGN2TEXT_500'), map_location=device))
     model.eval()
     with torch.no_grad():
         for batch_idx, (inputs, labels) in enumerate(iterator):
