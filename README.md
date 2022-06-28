@@ -2,6 +2,9 @@
 ### Master of Science in Data Analytics
 ### George Washington University
 
+#### Developers:
+[Chi Yun Chen](https://cyc-tw.medium.com/), [Jose Garcia](https://jgarcia2411.github.io/Jose-Garcia-Portfolio/), [qingzhu](https://medium.com/@vikadrew)
+
 ## Why & What
 Although there are many language translation applications in the market, very few, involve sign language. People who use sign language may have hearing or speaking problems or are in the deaf community. They seem like a minority group but have a 0.5 billion population worldwide surfing from hearing disability, not to mention if we include their relatives, friends, and coworkers. It is quite a potential market, but few people pay attention to it.
 
