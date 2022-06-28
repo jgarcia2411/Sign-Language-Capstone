@@ -25,6 +25,12 @@ Duarte, Amanda and Palaskar, Shruti and Ventura, Lucas and Ghadiyaram, Deepti an
 
 - EC2, AWS — to train the model
 
+## ML Algorithms
+
+- Convolution 3D: video classification tasks
+
+- Encoder-Decoder + Attention: translation tasks 
+
 ## Workflow
 
 - Video-Processing and Transformation
